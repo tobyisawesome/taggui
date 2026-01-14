@@ -36,6 +36,8 @@ MODELS = [
     'SmilingWolf/wd-v1-4-convnext-tagger-v2',
     'SmilingWolf/wd-v1-4-convnextv2-tagger-v2',
     'SmilingWolf/wd-v1-4-vit-tagger-v2',
+    'deepghs/pixai-tagger-v0.9-onnx',
+    'deepghs/ml-danbooru-onnx',
     'llava-hf/llava-1.5-7b-hf',
     'llava-hf/llava-1.5-13b-hf',
     'llava-hf/bakLlava-v1-hf',
@@ -78,6 +80,8 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         return Moondream2
     if 'phi-3' in lowercase_model_id:
         return Phi3Vision
-    if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
+    if ('wd' in lowercase_model_id and 'tagger' in lowercase_model_id
+            or 'pixai-tagger' in lowercase_model_id
+            or 'danbooru' in lowercase_model_id):
         return WdTagger
     return AutoCaptioningModel

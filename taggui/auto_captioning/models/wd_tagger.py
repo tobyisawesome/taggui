@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import huggingface_hub
+from huggingface_hub.utils import HfHubHTTPError
 import numpy as np
 from PIL import Image as PilImage
 from onnxruntime import InferenceSession
@@ -29,14 +30,8 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 class WdTaggerModel:
     def __init__(self, model_id: str):
-        model_path = Path(model_id) / 'model.onnx'
-        if not model_path.is_file():
-            model_path = huggingface_hub.hf_hub_download(model_id,
-                                                         filename='model.onnx')
-        tags_path = Path(model_id) / 'selected_tags.csv'
-        if not tags_path.is_file():
-            tags_path = huggingface_hub.hf_hub_download(
-                model_id, filename='selected_tags.csv')
+        model_path = self._get_model_path(model_id)
+        tags_path = self._get_tags_path(model_id)
         self.inference_session = InferenceSession(model_path)
         self.tags = []
         self.rating_tags_indices = []
@@ -45,17 +40,66 @@ class WdTaggerModel:
         with open(tags_path, 'r') as tags_file:
             reader = csv.DictReader(tags_file)
             for index, line in enumerate(reader):
-                tag = line['name']
+                if 'name' in line:
+                    tag = line['name']
+                    category = line.get('category')
+                else:
+                    tag = line['tag']
+                    category = None
                 if tag not in KAOMOJIS:
                     tag = tag.replace('_', ' ')
                 self.tags.append(tag)
-                category = line['category']
                 if category == '9':
                     self.rating_tags_indices.append(index)
                 elif category == '0':
                     self.general_tags_indices.append(index)
                 elif category == '4':
                     self.character_tags_indices.append(index)
+
+    def _get_model_path(self, model_id: str) -> str | Path:
+        local_path = Path(model_id)
+        candidate_files = [
+            'model.onnx',
+            'ml_caformer_m36_dec-5-97527.onnx',
+            'ml_caformer_m36_dec-3-80000.onnx',
+            'caformer_m36-3-80000.onnx',
+            'TResnet-D-FLq_ema_6-30000.onnx',
+            'TResnet-D-FLq_ema_6-10000.onnx',
+            'TResnet-D-FLq_ema_4-10000.onnx',
+            'TResnet-D-FLq_ema_2-40000.onnx',
+        ]
+        if local_path.is_dir():
+            for filename in candidate_files:
+                model_path = local_path / filename
+                if model_path.is_file():
+                    return model_path
+            for model_path in sorted(local_path.glob('*.onnx')):
+                return model_path
+        for filename in candidate_files:
+            try:
+                return huggingface_hub.hf_hub_download(model_id,
+                                                       filename=filename)
+            except HfHubHTTPError:
+                continue
+        raise FileNotFoundError(
+            f'No ONNX model file found for "{model_id}".')
+
+    def _get_tags_path(self, model_id: str) -> str | Path:
+        local_path = Path(model_id)
+        candidate_files = ['selected_tags.csv', 'tags.csv']
+        if local_path.is_dir():
+            for filename in candidate_files:
+                tags_path = local_path / filename
+                if tags_path.is_file():
+                    return tags_path
+        for filename in candidate_files:
+            try:
+                return huggingface_hub.hf_hub_download(model_id,
+                                                       filename=filename)
+            except HfHubHTTPError:
+                continue
+        raise FileNotFoundError(
+            f'No tags file found for "{model_id}".')
 
     def generate_tags(self, image_array: np.ndarray,
                       wd_tagger_settings: dict) -> tuple[tuple, tuple]:
