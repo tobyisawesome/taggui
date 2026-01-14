@@ -187,9 +187,11 @@ class WdTagger(AutoCaptioningModel):
         image_array = np.array(canvas, dtype=np.float32)
         # Reverse the order of the color channels (RGB -> BGR).
         image_array = image_array[:, :, ::-1]
+        # Normalize pixel values to the expected [0, 1] range.
+        image_array /= 255.0
         # Add a batch dimension and arrange channels if needed.
         image_array = self._prepare_input_tensor(image_array, input_shape)
-        return image_array
+        return np.ascontiguousarray(image_array)
 
     def _get_input_dimension(self, input_shape: list | tuple,
                              fallback_dimension: int) -> int:
