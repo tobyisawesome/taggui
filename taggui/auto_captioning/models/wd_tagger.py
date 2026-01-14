@@ -1,8 +1,10 @@
 # Based on
 # https://huggingface.co/spaces/SmilingWolf/wd-tagger/blob/main/app.py.
 import csv
+import json
 import re
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import huggingface_hub
@@ -36,6 +38,7 @@ TAGS_FILENAME_BY_REPO = {
     'deepghs/ml-danbooru-onnx': 'tags.csv',
     'deepghs/pixai-tagger-v0.9-onnx': 'selected_tags.csv',
 }
+PIXAI_REPO_ID = 'deepghs/pixai-tagger-v0.9-onnx'
 
 
 class WdTaggerModel:
@@ -190,6 +193,29 @@ class WdTagger(AutoCaptioningModel):
                     f'{captioning_start_datetime_string})')
         return 'Generating tags...'
 
+    def _is_pixai_model(self) -> bool:
+        return self.model_id.lower() == PIXAI_REPO_ID
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _get_pixai_preprocess() -> tuple[tuple[float, float, float],
+                                         tuple[float, float, float]]:
+        preprocess_path = Path(PIXAI_REPO_ID) / 'preprocess.json'
+        if not preprocess_path.is_file():
+            preprocess_path = Path(
+                huggingface_hub.hf_hub_download(
+                    PIXAI_REPO_ID, filename='preprocess.json'))
+        with open(preprocess_path, 'r') as preprocess_file:
+            data = json.load(preprocess_file)
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
+        for stage in data.get('stages', []):
+            if stage.get('type') == 'normalize':
+                mean = tuple(stage.get('mean', mean))
+                std = tuple(stage.get('std', std))
+                break
+        return mean, std
+
     def _get_input_layout(self) -> tuple[str, int | None]:
         input_shape = self.model.inference_session.get_inputs()[0].shape
         if len(input_shape) != 4:
@@ -226,12 +252,23 @@ class WdTagger(AutoCaptioningModel):
             input_dimensions = (input_dimension, input_dimension)
             canvas = canvas.resize(input_dimensions,
                                    resample=PilImage.Resampling.BICUBIC)
-        # Convert the image to a numpy array.
-        image_array = np.array(canvas, dtype=np.float32)
-        # Reverse the order of the color channels.
-        image_array = image_array[:, :, ::-1]
-        if layout == 'nchw':
-            image_array = np.transpose(image_array, (2, 0, 1))
+        if self._is_pixai_model():
+            mean, std = self._get_pixai_preprocess()
+            image_array = np.array(canvas, dtype=np.float32) / 255.0
+            if layout == 'nchw':
+                image_array = np.transpose(image_array, (2, 0, 1))
+                image_array = ((image_array - np.array(mean)[:, None, None]) /
+                               np.array(std)[:, None, None])
+            else:
+                image_array = ((image_array - np.array(mean)) /
+                               np.array(std))
+        else:
+            # Convert the image to a numpy array.
+            image_array = np.array(canvas, dtype=np.float32)
+            # Reverse the order of the color channels.
+            image_array = image_array[:, :, ::-1]
+            if layout == 'nchw':
+                image_array = np.transpose(image_array, (2, 0, 1))
         # Add a batch dimension.
         image_array = np.expand_dims(image_array, axis=0)
         return image_array
