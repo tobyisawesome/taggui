@@ -39,7 +39,7 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 
 MODEL_FILENAME_BY_REPO = {
-    'deepghs/ml-danbooru-onnx': 'ml_caformer_m36_dec-5-97527.onnx',
+    'deepghs/ml-danbooru-onnx': 'TResnet-D-FLq_ema_4-10000.onnx',
     'deepghs/pixai-tagger-v0.9-onnx': 'model.onnx',
 }
 TAGS_FILENAME_BY_REPO = {
@@ -118,9 +118,17 @@ class WdTaggerModel:
         return output_names[0]
 
     @staticmethod
+    def _split_model_id(model_id: str) -> tuple[str, str | None]:
+        if '::' in model_id:
+            repo_id, filename = model_id.split('::', 1)
+            return repo_id, filename or None
+        return model_id, None
+
+    @staticmethod
     def _resolve_repo_file(model_id: str, candidates: list[str],
                            extension: str) -> str:
-        model_path = Path(model_id)
+        repo_id, _ = WdTaggerModel._split_model_id(model_id)
+        model_path = Path(repo_id)
         if model_path.is_dir():
             for candidate in candidates:
                 candidate_path = model_path / candidate
@@ -130,46 +138,51 @@ class WdTaggerModel:
                 return str(candidate_path)
         for candidate in candidates:
             try:
-                return huggingface_hub.hf_hub_download(model_id,
+                return huggingface_hub.hf_hub_download(repo_id,
                                                        filename=candidate)
             except EntryNotFoundError:
                 continue
-        repo_files = huggingface_hub.list_repo_files(model_id)
+        repo_files = huggingface_hub.list_repo_files(repo_id)
         for repo_file in sorted(repo_files):
             if repo_file.endswith(extension):
-                return huggingface_hub.hf_hub_download(model_id,
+                return huggingface_hub.hf_hub_download(repo_id,
                                                        filename=repo_file)
         raise FileNotFoundError(
-            f'Could not locate {extension} file for model {model_id}')
+            f'Could not locate {extension} file for model {repo_id}')
 
     @classmethod
     def _resolve_model_path(cls, model_id: str) -> str:
-        model_id_lower = model_id.lower()
+        repo_id, explicit_filename = cls._split_model_id(model_id)
+        model_id_lower = repo_id.lower()
         candidates = []
+        if explicit_filename:
+            candidates.append(explicit_filename)
         if model_id_lower in MODEL_FILENAME_BY_REPO:
             candidates.append(MODEL_FILENAME_BY_REPO[model_id_lower])
         candidates.append('model.onnx')
-        return cls._resolve_repo_file(model_id, candidates, '.onnx')
+        return cls._resolve_repo_file(repo_id, candidates, '.onnx')
 
     @classmethod
     def _resolve_tags_path(cls, model_id: str) -> str:
-        model_id_lower = model_id.lower()
+        repo_id, _ = cls._split_model_id(model_id)
+        model_id_lower = repo_id.lower()
         candidates = []
         if model_id_lower in TAGS_FILENAME_BY_REPO:
             candidates.append(TAGS_FILENAME_BY_REPO[model_id_lower])
         candidates.extend(['selected_tags.csv', 'tags.csv'])
-        return cls._resolve_repo_file(model_id, candidates, '.csv')
+        return cls._resolve_repo_file(repo_id, candidates, '.csv')
 
     @classmethod
     def _resolve_preprocess(cls, model_id: str) -> PreprocessConfig | None:
-        model_path = Path(model_id)
+        repo_id, _ = cls._split_model_id(model_id)
+        model_path = Path(repo_id)
         preprocess_path = model_path / 'preprocess.json'
         if preprocess_path.is_file():
             preprocess_path = preprocess_path
         else:
             try:
                 preprocess_path = huggingface_hub.hf_hub_download(
-                    model_id, filename='preprocess.json')
+                    repo_id, filename='preprocess.json')
             except EntryNotFoundError:
                 return None
         with open(preprocess_path, 'r') as preprocess_file:
