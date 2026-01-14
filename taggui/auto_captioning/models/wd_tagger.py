@@ -1,14 +1,15 @@
 # Based on
 # https://huggingface.co/spaces/SmilingWolf/wd-tagger/blob/main/app.py.
 import csv
+import json
 import re
 from datetime import datetime
 from pathlib import Path
 
 import huggingface_hub
 import numpy as np
+import onnxruntime
 from PIL import Image as PilImage
-from onnxruntime import InferenceSession
 
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
@@ -29,21 +30,75 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 class WdTaggerModel:
     def __init__(self, model_id: str):
-        model_path = Path(model_id) / 'model.onnx'
+        model_filename, tags_filename = self._get_model_files(model_id)
+        model_path = Path(model_id) / model_filename
         if not model_path.is_file():
-            model_path = huggingface_hub.hf_hub_download(model_id,
-                                                         filename='model.onnx')
-        tags_path = Path(model_id) / 'selected_tags.csv'
+            model_path = huggingface_hub.hf_hub_download(
+                model_id, filename=model_filename)
+        tags_path = Path(model_id) / tags_filename
         if not tags_path.is_file():
             tags_path = huggingface_hub.hf_hub_download(
-                model_id, filename='selected_tags.csv')
-        self.inference_session = InferenceSession(model_path)
+                model_id, filename=tags_filename)
+        providers = self._get_providers()
+        self.inference_session = onnxruntime.InferenceSession(
+            model_path, providers=providers)
         self.tags = []
         self.rating_tags_indices = []
         self.general_tags_indices = []
         self.character_tags_indices = []
+        if tags_path.suffix == '.json':
+            self._load_tags_from_json(tags_path)
+        else:
+            self._load_tags_from_csv(tags_path)
+
+    @staticmethod
+    def _get_providers() -> list[str]:
+        available_providers = set(onnxruntime.get_available_providers())
+        preferred_providers = [
+            'CUDAExecutionProvider',
+            'ROCMExecutionProvider',
+            'DmlExecutionProvider',
+            'TensorrtExecutionProvider',
+            'CPUExecutionProvider'
+        ]
+        return [provider for provider in preferred_providers
+                if provider in available_providers]
+
+    @staticmethod
+    def _get_model_files(model_id: str) -> tuple[str, str]:
+        lowercase_model_id = model_id.lower()
+        if 'deepghs/ml-danbooru-onnx' in lowercase_model_id:
+            return 'ml_caformer_m36_dec-5-97527.onnx', 'classes.json'
+        if (Path(model_id) / 'classes.json').is_file():
+            onnx_files = sorted(Path(model_id).glob('*.onnx'))
+            if onnx_files:
+                return onnx_files[0].name, 'classes.json'
+        if (Path(model_id) / 'selected_tags.csv').is_file():
+            return 'model.onnx', 'selected_tags.csv'
+        if (Path(model_id) / 'tags.csv').is_file():
+            return 'model.onnx', 'tags.csv'
+        return 'model.onnx', 'selected_tags.csv'
+
+    def _load_tags_from_json(self, tags_path: Path) -> None:
+        with open(tags_path, 'r') as tags_file:
+            tags = json.load(tags_file)
+        for index, tag in enumerate(tags):
+            if tag not in KAOMOJIS:
+                tag = tag.replace('_', ' ')
+            self.tags.append(tag)
+            self.general_tags_indices.append(index)
+
+    def _load_tags_from_csv(self, tags_path: Path) -> None:
         with open(tags_path, 'r') as tags_file:
             reader = csv.DictReader(tags_file)
+            if 'category' not in reader.fieldnames:
+                for index, line in enumerate(reader):
+                    tag = line.get('tag', line.get('name', ''))
+                    if tag not in KAOMOJIS:
+                        tag = tag.replace('_', ' ')
+                    self.tags.append(tag)
+                    self.general_tags_indices.append(index)
+                return
             for index, line in enumerate(reader):
                 tag = line['name']
                 if tag not in KAOMOJIS:
