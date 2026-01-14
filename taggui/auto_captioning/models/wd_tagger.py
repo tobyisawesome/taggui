@@ -78,6 +78,7 @@ class WdTaggerModel:
                     self.general_tags_indices.append(index)
                 elif category == '4':
                     self.character_tags_indices.append(index)
+        self.output_name = self._get_output_name()
 
     @staticmethod
     def _get_providers() -> list[str]:
@@ -96,6 +97,25 @@ class WdTaggerModel:
             if provider in available_providers
         ]
         return preferred_providers or available_providers
+
+    def _get_output_name(self) -> str:
+        outputs = self.inference_session.get_outputs()
+        output_names = [output.name for output in outputs]
+        for output in outputs:
+            if output.name.lower() == 'prediction':
+                return output.name
+        for output in outputs:
+            if 'prob' in output.name.lower():
+                return output.name
+        tag_count = len(self.tags)
+        for output in outputs:
+            shape = output.shape
+            if not shape:
+                continue
+            last_dim = shape[-1]
+            if isinstance(last_dim, int) and last_dim == tag_count:
+                return output.name
+        return output_names[0]
 
     @staticmethod
     def _resolve_repo_file(model_id: str, candidates: list[str],
@@ -174,9 +194,13 @@ class WdTaggerModel:
     def generate_tags(self, image_array: np.ndarray,
                       wd_tagger_settings: dict) -> tuple[tuple, tuple]:
         input_name = self.inference_session.get_inputs()[0].name
-        output_name = self.inference_session.get_outputs()[0].name
+        output_name = self.output_name
         probabilities = self.inference_session.run(
             [output_name], {input_name: image_array})[0][0].astype(np.float32)
+        if ('logit' in output_name.lower()
+                or np.min(probabilities) < 0
+                or np.max(probabilities) > 1):
+            probabilities = 1 / (1 + np.exp(-probabilities))
         # Exclude the rating tags.
         tags = [tag for index, tag in enumerate(self.tags)
                 if index not in self.rating_tags_indices]
