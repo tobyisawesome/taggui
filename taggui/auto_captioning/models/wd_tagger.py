@@ -107,6 +107,7 @@ class WdTaggerModel:
         output_name = self.inference_session.get_outputs()[0].name
         probabilities = self.inference_session.run(
             [output_name], {input_name: image_array})[0][0].astype(np.float32)
+        probabilities = 1.0 / (1.0 + np.exp(-probabilities))
         # Exclude the rating tags.
         tags = [tag for index, tag in enumerate(self.tags)
                 if index not in self.rating_tags_indices]
