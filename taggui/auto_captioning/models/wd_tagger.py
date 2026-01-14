@@ -7,6 +7,7 @@ from pathlib import Path
 
 import huggingface_hub
 import numpy as np
+import onnxruntime
 from PIL import Image as PilImage
 from onnxruntime import InferenceSession
 
@@ -37,7 +38,9 @@ class WdTaggerModel:
         if not tags_path.is_file():
             tags_path = huggingface_hub.hf_hub_download(
                 model_id, filename='selected_tags.csv')
-        self.inference_session = InferenceSession(model_path)
+        providers = self._get_providers()
+        self.inference_session = InferenceSession(model_path,
+                                                   providers=providers)
         self.tags = []
         self.rating_tags_indices = []
         self.general_tags_indices = []
@@ -56,6 +59,24 @@ class WdTaggerModel:
                     self.general_tags_indices.append(index)
                 elif category == '4':
                     self.character_tags_indices.append(index)
+
+    @staticmethod
+    def _get_providers() -> list[str]:
+        available_providers = onnxruntime.get_available_providers()
+        provider_priority = [
+            'CUDAExecutionProvider',
+            'TensorrtExecutionProvider',
+            'ROCMExecutionProvider',
+            'DmlExecutionProvider',
+            'CoreMLExecutionProvider',
+            'OpenVINOExecutionProvider',
+            'CPUExecutionProvider',
+        ]
+        preferred_providers = [
+            provider for provider in provider_priority
+            if provider in available_providers
+        ]
+        return preferred_providers or available_providers
 
     def generate_tags(self, image_array: np.ndarray,
                       wd_tagger_settings: dict) -> tuple[tuple, tuple]:
