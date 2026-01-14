@@ -7,6 +7,8 @@ from pathlib import Path
 
 import huggingface_hub
 import numpy as np
+import onnxruntime
+from huggingface_hub.errors import EntryNotFoundError
 from PIL import Image as PilImage
 from onnxruntime import InferenceSession
 
@@ -29,15 +31,11 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 class WdTaggerModel:
     def __init__(self, model_id: str):
-        model_path = Path(model_id) / 'model.onnx'
-        if not model_path.is_file():
-            model_path = huggingface_hub.hf_hub_download(model_id,
-                                                         filename='model.onnx')
-        tags_path = Path(model_id) / 'selected_tags.csv'
-        if not tags_path.is_file():
-            tags_path = huggingface_hub.hf_hub_download(
-                model_id, filename='selected_tags.csv')
-        self.inference_session = InferenceSession(model_path)
+        model_path = self._get_model_path(model_id)
+        tags_path = self._get_tags_path(model_id)
+        providers = self._get_providers()
+        self.inference_session = InferenceSession(model_path,
+                                                   providers=providers)
         self.tags = []
         self.rating_tags_indices = []
         self.general_tags_indices = []
@@ -45,17 +43,80 @@ class WdTaggerModel:
         with open(tags_path, 'r') as tags_file:
             reader = csv.DictReader(tags_file)
             for index, line in enumerate(reader):
-                tag = line['name']
+                tag = line.get('name') or line.get('tag')
+                if not tag:
+                    continue
                 if tag not in KAOMOJIS:
                     tag = tag.replace('_', ' ')
                 self.tags.append(tag)
-                category = line['category']
+                category = line.get('category')
                 if category == '9':
                     self.rating_tags_indices.append(index)
                 elif category == '0':
                     self.general_tags_indices.append(index)
                 elif category == '4':
                     self.character_tags_indices.append(index)
+
+    @staticmethod
+    def _get_model_path(model_id: str) -> str:
+        preferred_model_files = {
+            'deepghs/ml-danbooru-onnx': [
+                'ml_caformer_m36_dec-5-97527.onnx',
+                'ml_caformer_m36_dec-3-80000.onnx',
+                'caformer_m36-3-80000.onnx',
+                'TResnet-D-FLq_ema_6-30000.onnx',
+                'TResnet-D-FLq_ema_6-10000.onnx',
+                'TResnet-D-FLq_ema_4-10000.onnx',
+                'TResnet-D-FLq_ema_2-40000.onnx',
+            ]
+        }
+        return WdTaggerModel._resolve_repo_file(
+            model_id, preferred_model_files.get(model_id, ['model.onnx']))
+
+    @staticmethod
+    def _get_tags_path(model_id: str) -> str:
+        preferred_tag_files = {
+            'deepghs/ml-danbooru-onnx': [
+                'tags.csv',
+            ]
+        }
+        return WdTaggerModel._resolve_repo_file(
+            model_id, preferred_tag_files.get(model_id, ['selected_tags.csv']))
+
+    @staticmethod
+    def _get_providers() -> list[str]:
+        available_providers = onnxruntime.get_available_providers()
+        provider_priority = [
+            'CUDAExecutionProvider',
+            'TensorrtExecutionProvider',
+            'ROCMExecutionProvider',
+            'DmlExecutionProvider',
+            'CoreMLExecutionProvider',
+            'OpenVINOExecutionProvider',
+            'CPUExecutionProvider',
+        ]
+        preferred_providers = [
+            provider for provider in provider_priority
+            if provider in available_providers
+        ]
+        return preferred_providers or available_providers
+
+    @staticmethod
+    def _resolve_repo_file(model_id: str, filenames: list[str]) -> str:
+        last_error = None
+        for filename in filenames:
+            candidate_path = Path(model_id) / filename
+            if candidate_path.is_file():
+                return str(candidate_path)
+            try:
+                return huggingface_hub.hf_hub_download(
+                    model_id, filename=filename)
+            except EntryNotFoundError as error:
+                last_error = error
+        if last_error:
+            raise last_error
+        raise FileNotFoundError(
+            f'No matching files found for {model_id}: {filenames}')
 
     def generate_tags(self, image_array: np.ndarray,
                       wd_tagger_settings: dict) -> tuple[tuple, tuple]:
@@ -132,9 +193,10 @@ class WdTagger(AutoCaptioningModel):
         vertical_padding = (max_dimension - pil_image.height) // 2
         canvas.paste(pil_image, (horizontal_padding, vertical_padding))
         # Resize the image to the model's input dimensions.
-        _, input_dimension, *_ = (self.model.inference_session.get_inputs()[0]
-                                  .shape)
-        if max_dimension != input_dimension:
+        input_shape = self.model.inference_session.get_inputs()[0].shape
+        input_layout = self._get_input_layout(input_shape)
+        input_dimension = self._get_input_dimension(input_shape, input_layout)
+        if input_dimension and max_dimension != input_dimension:
             input_dimensions = (input_dimension, input_dimension)
             canvas = canvas.resize(input_dimensions,
                                    resample=PilImage.Resampling.BICUBIC)
@@ -142,9 +204,29 @@ class WdTagger(AutoCaptioningModel):
         image_array = np.array(canvas, dtype=np.float32)
         # Reverse the order of the color channels.
         image_array = image_array[:, :, ::-1]
+        if input_layout == 'NCHW':
+            image_array = np.transpose(image_array, (2, 0, 1))
         # Add a batch dimension.
         image_array = np.expand_dims(image_array, axis=0)
         return image_array
+
+    @staticmethod
+    def _get_input_layout(input_shape: list | tuple) -> str:
+        if len(input_shape) >= 4:
+            if input_shape[1] == 3:
+                return 'NCHW'
+            if input_shape[3] == 3:
+                return 'NHWC'
+        return 'NHWC'
+
+    @staticmethod
+    def _get_input_dimension(input_shape: list | tuple,
+                             input_layout: str) -> int | None:
+        if len(input_shape) < 4:
+            return None
+        if input_layout == 'NCHW':
+            return input_shape[2] or input_shape[3]
+        return input_shape[1] or input_shape[2]
 
     def generate_caption(self, model_inputs: np.ndarray,
                          image_prompt: str) -> tuple[str, str]:
