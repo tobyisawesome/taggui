@@ -176,18 +176,43 @@ class WdTagger(AutoCaptioningModel):
         vertical_padding = (max_dimension - pil_image.height) // 2
         canvas.paste(pil_image, (horizontal_padding, vertical_padding))
         # Resize the image to the model's input dimensions.
-        _, input_dimension, *_ = (self.model.inference_session.get_inputs()[0]
-                                  .shape)
+        input_shape = self.model.inference_session.get_inputs()[0].shape
+        input_dimension = self._get_input_dimension(input_shape,
+                                                    max_dimension)
         if max_dimension != input_dimension:
             input_dimensions = (input_dimension, input_dimension)
             canvas = canvas.resize(input_dimensions,
                                    resample=PilImage.Resampling.BICUBIC)
         # Convert the image to a numpy array.
         image_array = np.array(canvas, dtype=np.float32)
-        # Reverse the order of the color channels.
+        # Reverse the order of the color channels (RGB -> BGR).
         image_array = image_array[:, :, ::-1]
-        # Add a batch dimension.
+        # Add a batch dimension and arrange channels if needed.
+        image_array = self._prepare_input_tensor(image_array, input_shape)
+        return image_array
+
+    def _get_input_dimension(self, input_shape: list | tuple,
+                             fallback_dimension: int) -> int:
+        if len(input_shape) != 4:
+            return fallback_dimension
+        for axis in (2, 3):
+            axis_value = input_shape[axis]
+            if isinstance(axis_value, int) and axis_value > 3:
+                return axis_value
+        for axis in (1, 2, 3):
+            axis_value = input_shape[axis]
+            if isinstance(axis_value, int) and axis_value > 3:
+                return axis_value
+        return fallback_dimension
+
+    def _prepare_input_tensor(self, image_array: np.ndarray,
+                              input_shape: list | tuple) -> np.ndarray:
         image_array = np.expand_dims(image_array, axis=0)
+        if len(input_shape) != 4:
+            return image_array
+        channel_axis = input_shape[1]
+        if isinstance(channel_axis, int) and channel_axis == 3:
+            return np.transpose(image_array, (0, 3, 1, 2))
         return image_array
 
     def generate_caption(self, model_inputs: np.ndarray,
